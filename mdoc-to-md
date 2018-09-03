@@ -1,0 +1,262 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+use utf8::all;
+
+use File::Temp qw( tempfile );
+use Getopt::Long::Descriptive;
+use IPC::Run3;
+use Scalar::Util qw( blessed );
+
+use HTML::TreeBuilder 5 -weak;
+use HTML::Entities;
+
+use Data::Dumper;
+
+my ($opt, $usage) = describe_options(
+    '%c %o [file]',
+    [ 'processed|p', "page is already mandoc HTML" ],
+    [ 'manopt|x=s@', "options to pass to mandoc" ],
+    [],
+    [ 'help|h', "print this help and exit", { shortcircuit => 1 } ],
+    [ 'version|V', "print version information and exit", { shortcircuit => 1 } ],
+);
+
+print($usage->text), exit if $opt->help;
+print("mdoc-to-md 0.1.0\n"), exit if $opt->version;
+
+my $filename = shift // '-';
+my $file;
+open($file, "<", $filename) or die "Can't open file $filename: $!";
+if (!$opt->processed) {
+    my $mandoc = $ENV{MANDOC} // 'mandoc';
+    my $html_file = tempfile("mdoc-html-XXXXXXXXXX", suffix => '.html.tmp');
+    run3([$mandoc, "-T", "html", "-O", "fragment", @{$opt->manopt() // []}], $file, $html_file);
+    die "mandoc returned $?" if $? != 0;
+    close $file;
+    binmode STDOUT, ":encoding(UTF-8)";
+    binmode STDERR, ":encoding(UTF-8)";
+    $file = $html_file;
+    seek $file, 0, 0;
+}
+
+my $root = HTML::TreeBuilder->new();
+$root->ignore_ignorable_whitespace(0);
+$root->ignore_unknown(0);
+$root->implicit_tags(0);
+$root->no_space_compacting(1);
+$root->store_comments(1);
+$root->warn(1);
+$root->parse_file($file) or die "parse_file failed with $!";
+close $file;
+# print "\n###########\n# NEW RUN #\n###########\n\n";
+my $man = $root->guts();
+
+sub is_spacer {
+    my @c = shift->content_list();
+    @c == 1 && $c[0] eq "\x{a0}"
+}
+sub trim_content {
+    my $el = shift;
+    my @content = $el->content_list();
+    my $side = shift // 'both';
+    my $trim_left = $side eq 'both' || $side eq 'left';
+    my $trim_right = $side eq 'both' || $side eq 'right';
+    my $begin = shift // 0;
+    my $end = shift // scalar(@content);
+    my $max_count = $end - $begin;
+    my $left_count = 0;
+    if ($trim_left) {
+        for (; $left_count < $max_count; $left_count++) {
+            my $focus = $content[$begin + $left_count];
+            if (ref($focus) eq 'HTML::Element' ||
+                !($focus =~ /^\s*$/)) {
+                last;
+            }
+        }
+    }
+    $max_count -= $left_count;
+    my $right_count = 0;
+    if ($trim_right) {
+        for (; $right_count < $max_count; $right_count++) {
+            my $focus = $content[$end - $right_count - 1];
+            if (ref($focus) eq 'HTML::Element' ||
+                !($focus =~ /^\s*$/)) {
+                last;
+            }
+        }
+    }
+    my @left = ();
+    my @right = ();
+    @right = $el->splice_content($end - $right_count, $right_count) if $trim_right;
+    @left = $el->splice_content($begin, $left_count) if $trim_left;
+    return (\@left, \@right);
+}
+sub top_level {
+    (shift->parent()->attr('class') // '') eq 'manual-text'
+}
+
+for my $code_block ($man->look_down(_tag => 'div', class => qr/Bd(?: Bd-indent)?/)) {
+    my $pre = $code_block->look_down(class => 'Li', _tag => qr/^(?:pre|code)$/);
+    my $text = $pre->as_text();
+    $text =~ s/^\n?(.*?)\n?$/$1/s;
+    my $literal = HTML::Element->new('~literal', 'text' => "\n```\n$text\n```\n");
+    $code_block->replace_with($literal);
+}
+for my $node ($man->look_down(_tag => qr/^(?:div|span)/)) {
+    next if !$node->parent() || $node->parent()->implicit();
+    if ($node->is_empty()) {
+        $node->detach();
+    } else {
+        $node->replace_with_content();
+    }
+}
+
+for my $xr ($man->look_down(_tag => 'a', class => 'Xr')) {
+    $xr->tag('b');
+}
+for my $h1 ($man->look_down(_tag => 'h1')) {
+    my $text = $h1->as_trimmed_text();
+    my $literal = HTML::Element->new('~literal', 'text' => "\n## $text\n");
+    $h1->replace_with($literal);
+}
+for my $a ($man->look_down(_tag => 'a', href => qr/^#/)) {
+    $a->replace_with_content();
+}
+for my $dt ($man->look_down(
+    _tag => 'dt',
+    \&is_spacer,
+)) {
+    my $parent = $dt->parent();
+    my @siblings = $parent->content_list();
+    my $pindex = $dt->pindex();
+    my $len = 1;
+    while ($siblings[$pindex+$len] =~ /^\s*$/) { $len++; }
+    my $el = $siblings[$pindex+$len];
+    unless (ref($el) eq 'HTML::Element' && is_spacer($el)) {
+        next;
+    }
+    while ($siblings[$pindex+$len] =~ /^\s*$/) { $len++; }
+    while ($pindex > 0 && $siblings[$pindex-1] =~ /^\s*$/) { $pindex--; $len++; }
+    $parent->splice_content($pindex, $len+1);
+}
+for my $nm ($man->look_down(
+    _tag => 'table',
+    class => 'Nm',
+    sub { !defined($_[0]->parent()) })
+) {
+    my $parent = $nm->parent();
+    my $last_tag = 'table';
+    my $last_ws;
+    {
+        my ($left, $right) = trim_content($nm, 'right');
+        $last_ws = $$right[-1];
+    }
+    my @siblings = $parent->content_list();
+    my $pos = $nm->pindex()+1;
+    my $len = 0;
+    while ($len < scalar(@siblings)) {
+        my $r = $siblings[$pos+$len];
+        unless (ref($r) eq 'HTML::Element') {
+            if ($r !~ /^\s*$/) {
+                last;
+            }
+            $len++;
+            next;
+        }
+        my $tag = $r->tag();
+        if ($tag eq 'table') {
+            my ($left, $right) = trim_content($r, 'right');
+            $last_ws = $$right[-1];
+            $nm->push_content($r->content_list());
+        } elsif (!($tag eq 'br' && $last_tag eq 'table')) {
+            last;
+        }
+        $len++;
+        $last_tag = $tag;
+    }
+    # preserve the final table whitespace (if present)
+    $nm->push_content($last_ws) if $last_ws;
+    # preserve the final whitespace (if present) before more elements
+    $len-- if !ref($siblings[$pos+$len-1]);
+    $parent->splice_content($pos, $len);
+}
+
+sub only_simple_text {
+    my @content = $_[0]->content_list();
+    scalar(@content) == 1 && !(ref($content[0]) eq 'HTML::Element')
+}
+for my $b ($man->look_down(_tag => 'b', \&top_level, \&only_simple_text)) {
+    my $text = $b->as_trimmed_text();
+    $b->replace_with("**$text**");
+}
+for my $a ($man->look_down(_tag => 'a', \&top_level, \&only_simple_text)) {
+    my $text = $a->as_trimmed_text();
+    my $href = $a->attr('href');
+    $a->replace_with("[$text]($href)");
+}
+for my $code ($man->look_down(_tag => 'code', \&top_level)) {
+    my @siblings = $code->parent()->content_refs_list();
+    my $i = $code->pindex();
+    my $l = $siblings[$i-1];
+    if ($l && !ref($$l)) {
+        $$l =~ s/\x{2018}$//;
+    }
+    my $r = $siblings[$i+1];
+    if ($r && !ref($$r)) {
+        $$r =~ s/^\x{2019}//;
+    }
+    my $content = $code->as_text();
+    my $max = 0;
+    while ($content =~ /`+/g) {
+        my $len = length($1);
+        $max = $len if $len > $max;
+    }
+    my $delim = "`" x ($max + 1);
+    my $literal = HTML::Element->new('~literal', 'text' => "$delim$content$delim");
+    $code->replace_with($literal);
+}
+
+for my $node ($man->content_list()) {
+    if (blessed($node) && ($node->attr('class') // '') eq 'head') {
+        $node->detach();
+        last;
+    }
+}
+
+trim_content($man);
+
+sub scrub_extra {
+    my @nodes = shift->look_down(sub {
+        my $el = $_[0];
+        defined($el->attr('class')) ||
+            defined($el->attr('title')) ||
+            defined($el->attr('id'))
+    });
+    for my $node (@nodes) {
+        $node->attr('class', undef);
+        $node->attr('title', undef);
+        $node->attr('id', undef);
+    }
+}
+
+my $entities = '<>&';
+for my $node ($man->content_list()) {
+    if (blessed($node)) {
+        my $class = $node->attr('class');
+        if ($class && $class eq 'manual-text') {
+            trim_content($node);
+            scrub_extra($node);
+            for my $n ($node->content_list()) {
+                print blessed($n) ? $n->as_HTML($entities, undef, {}) : encode_entities($n, $entities);
+            }
+        } else {
+            scrub_extra($node);
+            print $node->as_HTML($entities, undef, {});
+        }
+    } else {
+        print encode_entities($node, $entities);
+    }
+}
+print "\n";

@@ -1,0 +1,74 @@
+.Dd Sep 01, 2018
+.Dt MDOC-TO-MD 1
+.Os
+.
+.Sh NAME
+.Nm mdoc-to-md
+.Nd mdoc to GitHub Flavored Markdown converter
+.
+.Sh SYNOPSIS
+.Nm mdoc-to-md
+.Op Fl p | Fl -processed
+.Op Po Fl x | Fl -manopt Pc Ar option
+.Op Ar FILE
+.
+.Sh DESCRIPTION
+.Nm
+takes a manual page using
+.Xr mdoc 7
+macros and produces a Markdown version suitable for dropping in GitHub README.md
+files.
+.Pp
+With no
+.Ar FILE ,
+or when
+.Ar FILE
+is -, standard input is used.
+.Pp
+.Bl -tag -width Ds
+.It Fl p , Fl -processed
+Use an existing HTML document produced by
+.Ql mandoc -T html
+instead of raw mdoc.
+.It Fl x Ar option , Fl -manopt Ar option
+Pass
+.Ar option
+as an option to
+.Xr mandoc 1
+invocations. If you want to pass an option that takes an argument, you must
+specify it twice. For example, to specify the OS, use
+.Ql -x -I -x os=MY_OS .
+.
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev MANDOC
+The alternate
+.Xr mandoc 1
+executable to be used when producing HTML.
+.
+.Sh EXIT STATUS
+.Ex -std
+.
+.Sh EXAMPLES
+The following command is used to format this manual page.
+.Dl $ mdoc-to-md -x -I -x os=$VERSION mdoc-to-md.1.mdoc
+.
+.Sh BUGS
+The current processing method uses heuristics specific to mandoc's HTML output,
+and doesn't properly escape Markdown characters in the output.
+A better tool would take an arbitrary HTML <body>, reduce it to proper Markdown
+style, and then run any extra heuristics on top. A better tool would probably
+also not be written in Perl 5.
+.Pp
+If anything blocks you, let me know on GitHub or email me.
+.
+.Sh SEE ALSO
+.Xr mdoc 7 ,
+.Xr mandoc 1 ,
+.Lk https://github.github.com/gfm/ "GitHub Flavored Markdown Spec"
+.
+.Sh AUTHORS
+.An bb010g Aq Mt me@bb010g.com
+.Pp
+The latest sources, full contributor list, and more can be found at
+.Lk https://github.com/bb010g/mdoc-to-md .
