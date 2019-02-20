@@ -83,7 +83,7 @@ The following command is used to format this manual page.
 
 ```
 $ mdoc-to-md -x -I -x os=$VERSION
-  mdoc-to-md.1.mdoc
+  mdoc-to-md.1
 ```
 
 

@@ -1,26 +1,23 @@
-{ nixpkgs ? import <nixpkgs> {} }:
+{ pkgs ? import <nixpkgs> { } }:
+
 let
-  inherit (nixpkgs) pkgs;
-  inherit (pkgs) stdenv;
-  pkgsPinned = import (fetchTarball "https://api.github.com/repos/NixOS/nixpkgs/tarball/4477cf04b6779a537cdb5f0bd3dd30e75aeb4a3b") {};
-  inherit (pkgs) bash perl;
-  inherit (pkgsPinned) mandoc;
-  inherit (pkgs.perlPackages) GetoptLongDescriptive HTMLTree IPCRun3;
-  utf8all = pkgs.buildPerlPackage rec {
-    name = "utf8-all-0.024";
-    src = pkgs.fetchurl {
-      url = "mirror://cpan/authors/id/H/HA/HAYOBAAN/${name}.tar.gz";
-      sha256 = "9233465d41174077ccdbc04f751ab7d68c8d19114e36cd02f2c5fdc2bc3937b7";
-    };
-    meta = {
-      description = "turn on Unicode - all of it";
-      license = with stdenv.lib.licenses; [ artistic1 gpl1Plus ];
-    };
-    propagatedBuildInputs = with pkgs.perlPackages; [ Carp Encode ImportInto PerlIOutf8_strict Parent ];
-    buildInputs = with pkgs.perlPackages; [ perl PathTools IO TestException TestFatal TestMore TestWarn autodie constant threads threadsshared version ];
-  };
+
+  localPkgs = import ./. { inherit pkgs; };
+
 in
-stdenv.mkDerivation {
-  name = "semver-env";
-  buildInputs = [bash perl GetoptLongDescriptive HTMLTree IPCRun3 mandoc utf8all];
+pkgs.mkShell rec {
+  name = "mdoc-to-md-env";
+  buildInputs = [
+    pkgs.bash
+    pkgs.less
+    localPkgs.mdoc-to-md
+    localPkgs.mandoc
+  ] ++ localPkgs.mdoc-to-md.buildInputs;
+
+  MANPATH = let
+    inherit (pkgs.stdenv) lib;
+    pathPkgs = lib.misc.closePropagation buildInputs;
+    getUniqueOutputs = outputs: pkg: lib.unique (map (lib.flip lib.getOutput pkg) outputs);
+    paths = lib.concatMap (getUniqueOutputs [ "man" "devman" ]) pathPkgs;
+  in lib.concatStringsSep ":" (map (lib.flip lib.makeSearchPath paths) [ "share/man" "man" ]);
 }
